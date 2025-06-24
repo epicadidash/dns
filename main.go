@@ -1,96 +1,225 @@
 package main
 
-// import (
-// 	"encoding/binary"
-// 	"net"
-//  "fmt"
-//   "strings"
-// )
-// func main() {
-//   // Bind to UDP port 53
-//   conn, _ := net.ListenUDP("udp", &net.UDPAddr{Port: 53})
-//   defer conn.Close()
+import (
+	"fmt"
+	"log"
+	"net"
+	"strings"
+)
 
-//   // Read incoming requests
-//   for {
-//     buf := make([]byte, 512)
-//     n, addr, _ := conn.ReadFromUDP(buf)
-//     go handleRequest(conn, addr, buf[:n]) // Handle in a goroutine
-//   }
-// }
-// func parseHeader(data []byte) (id uint16, flags uint16, qdcount uint16) {
-//   id = binary.BigEndian.Uint16(data[0:2])
-//   flags = binary.BigEndian.Uint16(data[2:4])
-//   qdcount = binary.BigEndian.Uint16(data[4:6])
-//   return
-// }
+// DNS header structure
+type DNSHeader struct {
+	ID      uint16
+	Flags   uint16
+	QDCount uint16
+	ANCount uint16
+	NSCount uint16
+	ARCount uint16
+}
 
-// func parseQuestion(data []byte, offset int) (name string, offset int) {
-//   // Decode domain name (e.g., 3www7example3com0 -> "www.example.com")
-//   for {
-//     length := int(data[offset])
-//     if length == 0 { break }
-//     name += string(data[offset+1:offset+1+length]) + "."
-//     offset += length + 1
-//   }
-//   return name[:len(name)-1], offset + 4 // Skip QTYPE/QCLASS
-// }
-// func handleRequest(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
-//   id, flags, qdcount := parseHeader(data)
-//   name, _ := parseQuestion(data, 12) // Start after header (12 bytes)
+// DNS question structure
+type DNSQuestion struct {
+	Name  string
+	Type  uint16
+	Class uint16
+}
 
-//   // Hardcoded response for "example.com"
-//   if name == "example.com" {
-//     buildResponse(conn, addr, id, name, "192.0.2.1")
-//   }
-// }
-// func buildResponse(conn *net.UDPConn, addr *net.UDPAddr, id uint16, name string, ip string) {
-//   // Header (ID, Flags, QDCOUNT=1, ANCOUNT=1)
-//   response := make([]byte, 12)
-//   binary.BigEndian.PutUint16(response[0:2], id)
-//   binary.BigEndian.PutUint16(response[2:4], 0x8180) // QR=1, AA=1
-//   binary.BigEndian.PutUint16(response[4:6], 1)       // QDCOUNT=1
-//   binary.BigEndian.PutUint16(response[6:8], 1)       // ANCOUNT=1
+// DNS answer structure
+type DNSAnswer struct {
+	Name     string
+	Type     uint16
+	Class    uint16
+	TTL      uint32
+	RDLength uint16
+	RData    []byte
+}
 
-//   // Question Section (name, A record, IN class)
-//   response = append(response, encodeName(name)...)
-//   response = append(response, []byte{0x00, 0x01, 0x00, 0x01}...)
+// Simple DNS record store
+var dnsRecords = map[string]string{
+	"example.com":    "93.184.216.34",
+	"test.local":     "127.0.0.1",
+	"myserver.local": "192.168.1.100",
+	"google.com":     "8.8.8.8",
+}
 
-//   // Answer Section (name, A record, TTL=300, IP)
-//   response = append(response, encodeName(name)...)
-//   response = append(response, []byte{
-//     0x00, 0x01,        // TYPE=A
-//     0x00, 0x01,        // CLASS=IN
-//     0x00, 0x00, 0x01, 0x2c, // TTL=300
-//     0x00, 0x04,        // RDLENGTH=4 (IPv4)
-//   }...)
-//   response = append(response, net.ParseIP(ip).To4()...)
+func main() {
+	// Listen on UDP port 53
+	addr, err := net.ResolveUDPAddr("udp", ":53")
+	if err != nil {
+		log.Fatal("Error resolving address:", err)
+	}
 
-//   conn.WriteToUDP(response, addr)
-// }
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		log.Fatal("Error listening:", err)
+	}
+	defer conn.Close()
 
-// // encodeName converts a domain name to DNS-encoded format.
-// // Example: "example.com" → []byte{7, 'e','x','a','m','p','l','e', 3, 'c','o','m', 0}
-// func encodeName(name string) ([]byte, error) {
-//   // Trim trailing dot if present (e.g., "example.com." → "example.com")
-//   name = strings.TrimSuffix(name, ".")
-//   if name == "" {
-//     // Special case: root domain "." → single 0-byte
-//     return []byte{0}, nil
-//   }
+	fmt.Println("DNS Server started on port 53")
+	fmt.Println("Configured records:")
+	for domain, ip := range dnsRecords {
+		fmt.Printf("  %s -> %s\n", domain, ip)
+	}
 
-//   var encoded []byte
-//   labels := strings.Split(name, ".")
-//   for _, label := range labels {
-//     if len(label) == 0 {
-//       return nil, fmt.Errorf("empty label in domain name")
-//     }
-//     if len(label) > 63 {
-//       return nil, fmt.Errorf("label '%s' exceeds 63 characters", label)
-//     }
-//     encoded = append(encoded, byte(len(label)))
-//     encoded = append(encoded, label...)
-//   }
-//   encoded = append(encoded, 0) // Null terminator
-//   return encoded, nil
-// }
+	// Handle incoming requests
+	for {
+		buffer := make([]byte, 512)
+		n, clientAddr, err := conn.ReadFromUDP(buffer)
+		if err != nil {
+			log.Printf("Error reading UDP message: %v", err)
+			continue
+		}
+
+		go handleDNSRequest(conn, clientAddr, buffer[:n])
+	}
+}
+
+func handleDNSRequest(conn *net.UDPConn, clientAddr *net.UDPAddr, data []byte) {
+	if len(data) < 12 {
+		log.Printf("DNS request too short")
+		return
+	}
+
+	// Parse DNS header
+	header := parseDNSHeader(data)
+
+	// Parse question section
+	question, err := parseDNSQuestion(data[12:])
+	if err != nil {
+		log.Printf("Error parsing DNS question: %v", err)
+		return
+	}
+
+	fmt.Printf("DNS Query: %s (Type: %d, Class: %d) from %s\n",
+		question.Name, question.Type, question.Class, clientAddr)
+
+	// Create response
+	response := createDNSResponse(header, question)
+
+	// Send response
+	_, err = conn.WriteToUDP(response, clientAddr)
+	if err != nil {
+		log.Printf("Error sending response: %v", err)
+	}
+}
+
+func parseDNSHeader(data []byte) DNSHeader {
+	return DNSHeader{
+		ID:      uint16(data[0])<<8 | uint16(data[1]),
+		Flags:   uint16(data[2])<<8 | uint16(data[3]),
+		QDCount: uint16(data[4])<<8 | uint16(data[5]),
+		ANCount: uint16(data[6])<<8 | uint16(data[7]),
+		NSCount: uint16(data[8])<<8 | uint16(data[9]),
+		ARCount: uint16(data[10])<<8 | uint16(data[11]),
+	}
+}
+
+func parseDNSQuestion(data []byte) (DNSQuestion, error) {
+	var question DNSQuestion
+	var name strings.Builder
+	i := 0
+
+	// Parse domain name
+	for i < len(data) {
+		length := int(data[i])
+		if length == 0 {
+			i++
+			break
+		}
+
+		if name.Len() > 0 {
+			name.WriteByte('.')
+		}
+
+		i++
+		if i+length > len(data) {
+			return question, fmt.Errorf("invalid name length")
+		}
+
+		name.Write(data[i : i+length])
+		i += length
+	}
+
+	if i+4 > len(data) {
+		return question, fmt.Errorf("insufficient data for type and class")
+	}
+
+	question.Name = name.String()
+	question.Type = uint16(data[i])<<8 | uint16(data[i+1])
+	question.Class = uint16(data[i+2])<<8 | uint16(data[i+3])
+
+	return question, nil
+}
+
+func createDNSResponse(header DNSHeader, question DNSQuestion) []byte {
+	response := make([]byte, 0, 512)
+
+	// DNS Header
+	response = append(response, byte(header.ID>>8), byte(header.ID))
+	response = append(response, 0x81, 0x80) // Standard query response, no error
+	response = append(response, byte(header.QDCount>>8), byte(header.QDCount))
+
+	// Check if we have a record for this domain
+	ip, exists := dnsRecords[strings.ToLower(question.Name)]
+	if exists && question.Type == 1 { // A record
+		response = append(response, 0x00, 0x01) // Answer count = 1
+	} else {
+		response = append(response, 0x00, 0x00) // Answer count = 0
+	}
+
+	response = append(response, 0x00, 0x00) // Authority RRs
+	response = append(response, 0x00, 0x00) // Additional RRs
+
+	// Question section (echo back)
+	response = append(response, encodeDomainName(question.Name)...)
+	response = append(response, byte(question.Type>>8), byte(question.Type))
+	response = append(response, byte(question.Class>>8), byte(question.Class))
+
+	// Answer section
+	if exists && question.Type == 1 {
+		// Name (pointer to question)
+		response = append(response, 0xC0, 0x0C)
+
+		// Type (A record)
+		response = append(response, 0x00, 0x01)
+
+		// Class (IN)
+		response = append(response, 0x00, 0x01)
+
+		// TTL (300 seconds)
+		response = append(response, 0x00, 0x00, 0x01, 0x2C)
+
+		// Data length (4 bytes for IPv4)
+		response = append(response, 0x00, 0x04)
+
+		// IP address
+		ipBytes := net.ParseIP(ip).To4()
+		if ipBytes != nil {
+			response = append(response, ipBytes...)
+			fmt.Printf("Responding with: %s -> %s\n", question.Name, ip)
+		}
+	} else {
+		fmt.Printf("No record found for: %s\n", question.Name)
+	}
+
+	return response
+}
+
+func encodeDomainName(name string) []byte {
+	if name == "" {
+		return []byte{0}
+	}
+
+	parts := strings.Split(name, ".")
+	encoded := make([]byte, 0, len(name)+2)
+
+	for _, part := range parts {
+		if len(part) > 0 {
+			encoded = append(encoded, byte(len(part)))
+			encoded = append(encoded, []byte(part)...)
+		}
+	}
+	encoded = append(encoded, 0) // Null terminator
+
+	return encoded
+}
